@@ -1,0 +1,13 @@
+{
+  "appId": "com.library.authenticator.staff",
+  "appName": "Library Staff Auth",
+  "webDir": "www",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1000,
+      "backgroundColor": "#f59e0b",
+      "showSpinner": false,
+      "launchAutoHide": true
+    }
+  }
+}

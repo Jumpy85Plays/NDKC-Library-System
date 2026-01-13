@@ -1,0 +1,446 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { LogIn, Scan, UserPlus, ContactRound, Loader2 } from 'lucide-react';
+import BarcodeScanner from '@/components/BarcodeScanner';
+import RFIDScanner from '@/components/RFIDScanner';
+
+import BackButton from '@/components/BackButton';
+import { toast } from '@/components/ui/use-toast';
+import { attendanceService } from '@/services/attendanceService';
+import { studentService } from '@/services/studentService';
+import { AttendanceEntry } from '@/types/AttendanceEntry';
+import { getFromLocalStorage } from '@/utils/offlineStorage';
+import { useLibrary } from '@/contexts/LibraryContext';
+
+const CheckInPage = () => {
+  const { currentLibrary } = useLibrary();
+  const [scannerMode, setScannerMode] = useState<'barcode' | 'rfid' | 'manual'>('barcode');
+  const [studentId, setStudentId] = useState('');
+  const [studentName, setStudentName] = useState('');
+  const [rfidInput, setRfidInput] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+
+  const rfidInputRef = useRef<HTMLInputElement>(null);
+  const lastRFIDRef = useRef<{ value: string; time: number } | null>(null);
+  
+  // Pre-load data cache on mount to prevent white screen
+  useEffect(() => {
+    const preloadCache = async () => {
+      try {
+        await getFromLocalStorage();
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    preloadCache();
+  }, []);
+  
+  useEffect(() => {
+    if (scannerMode === 'rfid') {
+      rfidInputRef.current?.focus();
+    }
+  }, [scannerMode]);
+
+  const findStudent = async (searchId: string) => {
+    // First check local storage
+    const localData = await getFromLocalStorage();
+    const localStudents = localData.students.filter(s =>
+      (s.studentId === searchId || s.id === searchId || s.rfid === searchId) &&
+      (!s.library || s.library === currentLibrary)
+    );
+    
+    // Return most recent local match
+    if (localStudents.length > 0) {
+      return localStudents.sort((a, b) => {
+        const dateA = a.registrationDate ? new Date(a.registrationDate).getTime() : 0;
+        const dateB = b.registrationDate ? new Date(b.registrationDate).getTime() : 0;
+        return dateB - dateA;
+      })[0];
+    }
+
+    // Try online lookup if available
+    try {
+      if (navigator.onLine) {
+        // Try finding by barcode/student ID first
+        let student = await studentService.findStudentByBarcode(searchId, currentLibrary);
+        
+        // If not found by barcode, try RFID
+        if (!student) {
+          student = await studentService.findStudentByRFID(searchId, currentLibrary);
+        }
+        
+        return student;
+      }
+    } catch (error) {
+      console.log('Online lookup failed, using local data only');
+    }
+    
+    return null;
+  };
+
+  const handleRfidInput = async (rfidValue: string) => {
+    if (!rfidValue.trim()) return;
+    const val = rfidValue.trim();
+    const now = Date.now();
+    if (lastRFIDRef.current && lastRFIDRef.current.value === val && now - lastRFIDRef.current.time < 1500) {
+      setRfidInput('');
+      return;
+    }
+    lastRFIDRef.current = { value: val, time: now };
+    
+    try {
+      const student = await findStudent(val);
+      
+      if (student) {
+        const newRecord: Omit<AttendanceEntry, 'id'> = {
+          studentDatabaseId: student.id,
+          studentId: student.studentId,
+          studentName: student.name,
+          timestamp: new Date(),
+          type: 'check-in',
+          method: 'rfid',
+          course: student.course,
+          year: student.year,
+          userType: student.userType || 'student',
+          studentType: student.studentType,
+          level: student.level,
+          strand: student.strand
+        };
+        
+        try {
+          await attendanceService.addAttendanceRecord(newRecord);
+          toast({
+            title: "Welcome!",
+            description: `${student.name} checked in successfully`,
+            duration: 3000,
+          });
+          setRfidInput(''); // Clear input for next scan
+        } catch (error: any) {
+          if (error.message?.startsWith('COOLDOWN:')) {
+            const parts = error.message.split(':');
+            const remainingMinutes = parseInt(parts[1] || '0', 10);
+            const remainingSeconds = parseInt(parts[2] || '0', 10);
+            const timeMsg = remainingMinutes > 0 
+              ? `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''} ${remainingSeconds > 0 ? `and ${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}` : ''}`
+              : `${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}`;
+            toast({
+              title: "⏱️ Please wait",
+              description: `Please wait ${timeMsg} before checking in again`,
+              variant: "destructive",
+            });
+            setRfidInput('');
+            return;
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        toast({
+          title: "Student Not Found",
+          description: "RFID not registered. Please register student first.",
+          variant: "destructive",
+        });
+        setRfidInput(''); // Clear input
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
+      setRfidInput(''); // Clear input
+    }
+  };
+
+  const handleBarcodeDetected = async (barcode: string) => {
+    try {
+      const student = await findStudent(barcode);
+      
+      if (student) {
+        const newRecord: Omit<AttendanceEntry, 'id'> = {
+          studentDatabaseId: student.id,
+          studentId: student.studentId,
+          studentName: student.name,
+          timestamp: new Date(),
+          type: 'check-in',
+          barcode: barcode,
+          method: 'barcode',
+          course: student.course,
+          year: student.year,
+          userType: student.userType || 'student',
+          studentType: student.studentType,
+          level: student.level,
+          strand: student.strand
+        };
+        
+        try {
+          await attendanceService.addAttendanceRecord(newRecord);
+          
+          toast({
+            title: "Welcome!",
+            description: `${student.name} checked in successfully`,
+            duration: 3000,
+          });
+        } catch (error: any) {
+          if (error.message?.startsWith('COOLDOWN:')) {
+            const parts = error.message.split(':');
+            const remainingMinutes = parseInt(parts[1] || '0', 10);
+            const remainingSeconds = parseInt(parts[2] || '0', 10);
+            const timeMsg = remainingMinutes > 0 
+              ? `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''} ${remainingSeconds > 0 ? `and ${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}` : ''}`
+              : `${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}`;
+            toast({
+              title: "⏱️ Please wait",
+              description: `Please wait ${timeMsg} before checking in again`,
+              variant: "destructive",
+            });
+            return;
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        toast({
+          title: "Student Not Found",
+          description: "Student not found. Try manual entry or register new student.",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Something went wrong. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleManualCheckIn = async () => {
+    if (!studentId.trim()) {
+      toast({
+        title: "Error",
+        description: "Please enter a student ID",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const student = await findStudent(studentId.trim());
+      let finalStudentName = studentName.trim();
+      
+      if (student) {
+        finalStudentName = student.name;
+      } else {
+        // Student not found - require registration first
+        toast({
+          title: "Student Not Found",
+          description: "Please register this student first before checking in.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const newRecord: Omit<AttendanceEntry, 'id'> = {
+        studentDatabaseId: student?.id,
+        studentId: studentId.trim(),
+        studentName: finalStudentName,
+        timestamp: new Date(),
+        type: 'check-in',
+        method: 'manual',
+        course: student?.course,
+        year: student?.year,
+        userType: student?.userType || 'student',
+        studentType: student?.studentType,
+        level: student?.level,
+        strand: student?.strand
+      };
+      
+      try {
+        await attendanceService.addAttendanceRecord(newRecord);
+        
+        toast({
+          title: "Welcome!",
+          description: `${finalStudentName} checked in successfully`,
+          duration: 2000,
+        });
+
+        // Switch to RFID mode and focus input for next user
+        setStudentId('');
+        setStudentName('');
+        setScannerMode('rfid');
+        setRfidInput('');
+        setTimeout(() => {
+          rfidInputRef.current?.focus();
+        }, 100);
+      } catch (recordError: any) {
+        if (recordError.message?.startsWith('COOLDOWN:')) {
+          const parts = recordError.message.split(':');
+          const remainingMinutes = parseInt(parts[1] || '0', 10);
+          const remainingSeconds = parseInt(parts[2] || '0', 10);
+          const timeMsg = remainingMinutes > 0 
+            ? `${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''} ${remainingSeconds > 0 ? `and ${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}` : ''}`
+            : `${remainingSeconds} second${remainingSeconds > 1 ? 's' : ''}`;
+          toast({
+            title: "⏱️ Please wait",
+            description: `Please wait ${timeMsg} before checking in again`,
+            variant: "destructive",
+          });
+        } else {
+          throw recordError;
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to record check-in. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 p-4 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="h-12 w-12 animate-spin text-green-500 mx-auto mb-4" />
+          <p className="text-lg text-gray-600">Loading student data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 p-4 flex items-center justify-center">
+      <Card className="w-full max-w-2xl shadow-2xl">
+        <CardHeader className="text-center bg-green-500 text-white rounded-t-lg">
+          <CardTitle className="text-4xl font-bold flex items-center justify-center gap-4">
+            <LogIn size={48} />
+            Library Check In
+          </CardTitle>
+          <p className="text-xl mt-2">
+            {scannerMode === 'manual' ? 'Manual check-in entry' : 
+             scannerMode === 'rfid' ? 'Use your RFID card to enter the library' :
+             'Scan your student ID to enter the library'}
+          </p>
+        </CardHeader>
+        
+        <CardContent className="p-8">
+          <div className="mb-4">
+            <BackButton to="/" />
+          </div>
+          
+          
+          <div className="text-center space-y-6">
+            <div className="flex gap-2 justify-center mb-6 flex-wrap">
+              <Button 
+                onClick={() => setScannerMode('barcode')}
+                variant={scannerMode === 'barcode' ? "default" : "outline"}
+                size="sm"
+              >
+                <Scan className="h-4 w-4 mr-2" />
+                Barcode
+              </Button>
+              <Button 
+                onClick={() => setScannerMode('rfid')}
+                variant={scannerMode === 'rfid' ? "default" : "outline"}
+                size="sm"
+              >
+                <ContactRound className="h-4 w-4 mr-2" />
+                RFID
+              </Button>
+              <Button 
+                onClick={() => setScannerMode('manual')}
+                variant={scannerMode === 'manual' ? "default" : "outline"}
+                size="sm"
+              >
+                <UserPlus className="h-4 w-4 mr-2" />
+                Manual
+              </Button>
+            </div>
+
+            {scannerMode === 'barcode' ? (
+              <>
+                <div className="bg-gray-50 rounded-lg p-6">
+                  <Scan size={64} className="mx-auto mb-4 text-gray-600" />
+                  <h3 className="text-2xl font-semibold mb-2">Scan Your Student ID Barcode</h3>
+                  <p className="text-gray-600 text-lg">Hold your student ID barcode to the camera</p>
+                </div>
+                
+                <BarcodeScanner onBarcodeDetected={handleBarcodeDetected} isActive={true} />
+              </>
+            ) : scannerMode === 'rfid' ? (
+              <>
+                <div className="bg-gray-50 rounded-lg p-6 mb-4">
+                  <ContactRound size={64} className="mx-auto mb-4 text-gray-600" />
+                  <h3 className="text-2xl font-semibold mb-2">Scan Your RFID Card</h3>
+                  <p className="text-gray-600 text-lg mb-4">Tap your RFID card on the scanner or click in the field below</p>
+                </div>
+                
+                <div className="max-w-md mx-auto">
+                  <Label htmlFor="rfidInput" className="text-lg font-medium">RFID Scanner Input</Label>
+                  <Input
+                    id="rfidInput"
+                    ref={rfidInputRef}
+                    value={rfidInput}
+                    onChange={(e) => setRfidInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && rfidInput.trim()) {
+                        handleRfidInput(rfidInput);
+                      }
+                    }}
+                    placeholder="Scan RFID card here..."
+                    className="text-center text-lg py-3 mt-2"
+                    autoFocus
+                  />
+                  <p className="text-sm text-gray-500 mt-2 text-center">
+                    RFID scanners will automatically input the card data here. Press Enter or scan will auto-submit.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="bg-gray-50 rounded-lg p-6 text-left max-w-md mx-auto">
+                <h3 className="text-2xl font-semibold mb-4 text-center">Manual Check-In</h3>
+                <div className="space-y-4">
+                  <div>
+                    <Label htmlFor="studentId">Student ID *</Label>
+                    <Input
+                      id="studentId"
+                      value={studentId}
+                      onChange={(e) => setStudentId(e.target.value)}
+                      placeholder="Enter student ID"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="studentName">Student Name (optional if ID exists)</Label>
+                    <Input
+                      id="studentName"
+                      value={studentName}
+                      onChange={(e) => setStudentName(e.target.value)}
+                      placeholder="Enter student name"
+                    />
+                  </div>
+                  <Button onClick={handleManualCheckIn} className="w-full">
+                    Check In
+                  </Button>
+                </div>
+              </div>
+            )}
+            
+            <div className="mt-8 p-4 bg-blue-50 rounded-lg">
+              <p className="text-lg text-blue-800">
+                <strong>Need help?</strong> Please ask library staff for assistance.
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default CheckInPage;

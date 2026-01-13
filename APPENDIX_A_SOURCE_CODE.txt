@@ -1,0 +1,1236 @@
+===========================================
+APPENDIX A: SOURCE CODE DOCUMENTATION
+LIBRARY ATTENDANCE SYSTEM
+===========================================
+
+Project: Library Attendance Management System with Multi-Device Support
+Version: 1.0.0
+Platform: Cross-platform (Web, Desktop, Mobile)
+Last Updated: January 2025
+
+===========================================
+TABLE OF CONTENTS
+===========================================
+
+1. CORE APPLICATION FILES
+   1.1 Main Entry Point (src/main.tsx)
+   1.2 Application Component (src/App.tsx)
+   1.3 Global Styles (src/index.css)
+
+2. ELECTRON DESKTOP APPLICATION
+   2.1 Main Process (electron/main.js)
+   2.2 Preload Script (electron/preload.js)
+   2.3 Database Manager (electron/database.js)
+   2.4 Encryption Module (electron/encryption.js)
+   2.5 Key Management (electron/keyManagement.js)
+   2.6 Migration Utilities (electron/migration.js)
+   2.7 Backup System (electron/backup.js)
+
+3. DATA SERVICES LAYER
+   3.1 Student Service (src/services/studentService.ts)
+   3.2 Attendance Service (src/services/attendanceService.ts)
+   3.3 Sync Service (src/services/syncService.ts)
+   3.4 Auto-Sync Service (src/services/autoSyncService.ts)
+   3.5 Supabase Service (src/services/supabaseService.ts)
+   3.6 Document Service (src/services/documentService.ts)
+   3.7 Realtime Service (src/services/realtimeService.ts)
+   3.8 Theme Service (src/services/themeService.ts)
+
+4. STORAGE MANAGEMENT SYSTEM
+   4.1 Offline Storage Interface (src/utils/offlineStorage.ts)
+   4.2 Storage Manager (src/utils/storage/manager.ts)
+   4.3 Electron SQLite Driver (src/utils/storage/electronSqliteDriver.ts)
+   4.4 IndexedDB Driver (src/utils/storage/indexedDbStorage.ts)
+   4.5 LocalStorage Driver (src/utils/storage/localStorageDriver.ts)
+   4.6 Storage Type Definitions (src/utils/storage/types.ts)
+
+5. KEY COMPONENTS
+   5.1 RFID Scanner (src/components/RFIDScanner.tsx)
+   5.2 Barcode Scanner (src/components/BarcodeScanner.tsx)
+   5.3 Biometric Scanner (src/components/BiometricScanner.tsx)
+   5.4 TOTP Verification (src/components/TOTPVerification.tsx)
+   5.5 Attendance Table (src/components/AttendanceTable.tsx)
+   5.6 Student Registration (src/components/StudentRegistration.tsx)
+   5.7 Export Controls (src/components/ExportControls.tsx)
+   5.8 Sync Controls (src/components/SyncControls.tsx)
+
+6. PROTECTED PAGES
+   6.1 Protected Admin Page (src/pages/ProtectedAdminPage.tsx)
+   6.2 Protected Staff Page (src/pages/ProtectedStaffPage.tsx)
+   6.3 Authenticator App (src/pages/AuthenticatorApp.tsx)
+   6.4 Check-In Dashboard (src/pages/CheckInDashboard.tsx)
+   6.5 Check-Out Dashboard (src/pages/CheckOutDashboard.tsx)
+
+7. TYPE DEFINITIONS
+   7.1 Student Type (src/types/Student.ts)
+   7.2 Attendance Entry Type (src/types/AttendanceEntry.ts)
+   7.3 Electron API Types (src/types/electron.d.ts)
+
+8. UTILITY FUNCTIONS
+   8.1 Export Utilities (src/utils/exportUtils.ts)
+   8.2 TOTP Offline Storage (src/utils/totpOfflineStorage.ts)
+   8.3 Force Sync Utility (src/utils/forceSync.ts)
+   8.4 Data Integrity Check (src/utils/dataIntegrityCheck.ts)
+   8.5 Bulk Student Import (src/utils/bulkStudentImport.ts)
+   8.6 XLSX Export (src/utils/xlsxExport.ts)
+
+9. CONFIGURATION FILES
+   9.1 Vite Configuration (vite.config.ts)
+   9.2 Tailwind Configuration (tailwind.config.ts)
+   9.3 Electron Builder Configuration (electron-builder.json)
+   9.4 Capacitor Configuration (capacitor.config.json)
+
+10. BUILD AND DEPLOYMENT
+    10.1 Build Instructions
+    10.2 Package Dependencies
+    10.3 Environment Configuration
+
+
+===========================================
+1. CORE APPLICATION FILES
+===========================================
+
+1.1 MAIN ENTRY POINT (src/main.tsx)
+-------------------------------------------
+Purpose: Application entry point with service worker registration
+Lines of Code: 48
+Dependencies: React, Service Worker API
+
+```typescript
+import { createRoot } from 'react-dom/client'
+import App from './App.tsx'
+import './index.css'
+import './services/autoSyncService'
+
+// Register service worker for offline functionality
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then((registration) => {
+        console.log('SW registered: ', registration);
+        
+        // Check for updates periodically
+        setInterval(() => {
+          registration.update();
+        }, 60000); // Check every minute
+        
+        // Handle updates
+        registration.addEventListener('updatefound', () => {
+          const newWorker = registration.installing;
+          if (newWorker) {
+            newWorker.addEventListener('statechange', () => {
+              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                console.log('New service worker available');
+                // Optionally show update notification to user
+              }
+            });
+          }
+        });
+      })
+      .catch((registrationError) => {
+        console.log('SW registration failed: ', registrationError);
+      });
+  });
+
+  // Listen for service worker messages
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SKIP_WAITING') {
+      window.location.reload();
+    }
+  });
+}
+
+// Initialize auto-sync service
+console.log('Auto-sync service initialized');
+
+createRoot(document.getElementById("root")!).render(<App />);
+```
+
+Key Features:
+- Service worker registration for offline support
+- Automatic update checking every 60 seconds
+- Auto-sync service initialization
+- Progressive Web App (PWA) capabilities
+
+
+1.2 APPLICATION COMPONENT (src/App.tsx)
+-------------------------------------------
+Purpose: Main application component with routing
+Lines of Code: 65
+Dependencies: React Router, React Query, Custom Context
+
+```typescript
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { HashRouter, Routes, Route } from "react-router-dom";
+import { LibraryProvider } from "@/contexts/LibraryContext";
+import { useTheme } from "@/hooks/useTheme";
+import HomePage from "@/pages/HomePage";
+import CheckInDashboard from "@/pages/CheckInDashboard";
+import CheckOutDashboard from "@/pages/CheckOutDashboard";
+import ProtectedAdminPage from "@/pages/ProtectedAdminPage";
+import ProtectedStaffPage from "@/pages/ProtectedStaffPage";
+import AuthenticatorApp from "@/pages/AuthenticatorApp";
+import NotFound from "@/pages/NotFound";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5 * 60 * 1000, // 5 minutes
+      gcTime: 10 * 60 * 1000,   // 10 minutes
+      retry: 3,
+      refetchOnWindowFocus: true,
+    },
+  },
+});
+
+const App = () => {
+  useTheme();
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <LibraryProvider>
+          <Toaster />
+          <Sonner />
+          <div className="min-h-screen bg-background">
+            <main className="pb-20">
+              <HashRouter>
+                <Routes>
+                  <Route path="/" element={<HomePage />} />
+                  <Route path="/checkin" element={<CheckInDashboard />} />
+                  <Route path="/checkout" element={<CheckOutDashboard />} />
+                  <Route path="/admin" element={<ProtectedAdminPage />} />
+                  <Route path="/staff" element={<ProtectedStaffPage />} />
+                  <Route path="/authenticator" element={<AuthenticatorApp />} />
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </HashRouter>
+            </main>
+          </div>
+        </LibraryProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+};
+
+export default App;
+```
+
+Key Features:
+- React Query for data fetching and caching
+- Hash-based routing for Electron compatibility
+- Multi-library context provider
+- Toast notifications (dual system)
+- Protected route management
+- Theme system integration
+
+
+===========================================
+2. ELECTRON DESKTOP APPLICATION
+===========================================
+
+2.1 MAIN PROCESS (electron/main.js)
+-------------------------------------------
+Purpose: Electron main process with window management and IPC
+Lines of Code: 625
+Dependencies: Electron, Better-SQLite3, Node.js Core
+
+```javascript
+const { app, BrowserWindow, Menu, ipcMain, dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const isDev = process.env.NODE_ENV === 'development';
+
+const { initDatabase, saveStudents, loadStudents, saveAttendance, loadAttendance, 
+        getStudentById, getStudentByRFID, getLastAttendance, vacuumDatabase, 
+        checkIntegrity, getStats, clearAllData, removeDuplicateAttendance,
+        getSyncMetadata, setSyncMetadata } = require('./database');
+const { createBackup, restoreBackup, listBackups } = require('./backup');
+const { initEncryption, getOrCreateEncryptionKey } = require('./keyManagement');
+
+let mainWindow;
+
+// Initialize encryption before anything else
+async function initializeApp() {
+  try {
+    await getOrCreateEncryptionKey();
+    await initEncryption();
+    await initDatabase();
+    console.log('✅ Application initialized with encryption');
+  } catch (error) {
+    console.error('❌ Failed to initialize application:', error);
+    dialog.showErrorBox('Initialization Error', 
+      'Failed to initialize the application. Please restart.');
+    app.quit();
+  }
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 1024,
+    minHeight: 768,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      enableRemoteModule: false,
+      preload: path.join(__dirname, 'preload.js')
+    },
+    icon: path.join(__dirname, '../public/favicon.ico'),
+    title: 'Library Attendance System',
+    backgroundColor: '#ffffff'
+  });
+
+  const startURL = isDev
+    ? 'http://localhost:8080'
+    : `file://${path.join(__dirname, '../dist/index.html')}`;
+
+  mainWindow.loadURL(startURL);
+
+  if (isDev) {
+    mainWindow.webContents.openDevTools();
+  }
+
+  createMenu();
+}
+
+function createMenu() {
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Create Backup',
+          accelerator: 'CmdOrCtrl+B',
+          click: async () => {
+            const result = await createBackup();
+            if (result.success) {
+              dialog.showMessageBox(mainWindow, {
+                type: 'info',
+                title: 'Backup Created',
+                message: `Backup created successfully at:\n${result.path}`
+              });
+            } else {
+              dialog.showErrorBox('Backup Failed', result.error);
+            }
+          }
+        },
+        {
+          label: 'Restore Backup',
+          click: async () => {
+            const result = await restoreBackup();
+            if (result.success) {
+              dialog.showMessageBox(mainWindow, {
+                type: 'info',
+                title: 'Backup Restored',
+                message: 'Backup restored successfully. Please restart the application.'
+              });
+              app.relaunch();
+              app.exit(0);
+            }
+          }
+        },
+        { type: 'separator' },
+        {
+          label: 'Vacuum Database',
+          click: async () => {
+            const result = await vacuumDatabase();
+            if (result.success) {
+              dialog.showMessageBox(mainWindow, {
+                type: 'info',
+                title: 'Database Optimized',
+                message: 'Database has been optimized successfully.'
+              });
+            }
+          }
+        },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Show Diagnostics',
+          click: async () => {
+            const stats = await getStats();
+            const integrity = await checkIntegrity();
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'System Diagnostics',
+              message: `Database Statistics:\n\n` +
+                      `Students: ${stats.data?.students || 0}\n` +
+                      `Attendance Records: ${stats.data?.attendance || 0}\n` +
+                      `Database Size: ${stats.data?.size || 'Unknown'}\n` +
+                      `Encryption: Initialized\n` +
+                      `Integrity: ${integrity.isValid ? 'Valid' : 'Invalid'}\n` +
+                      `Storage: SQLite (Encrypted)`
+            });
+          }
+        },
+        {
+          label: 'About',
+          click: () => {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'About Library Attendance System',
+              message: 'Library Attendance Management System\nVersion 1.0.0\n\n' +
+                      'A secure, offline-first attendance tracking solution\n' +
+                      'with AES-256-GCM encryption and multi-device sync.'
+            });
+          }
+        }
+      ]
+    }
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
+// Setup IPC handlers
+function setupIpcHandlers() {
+  // Student operations
+  ipcMain.handle('save-students', async (event, students) => {
+    return await saveStudents(students);
+  });
+
+  ipcMain.handle('load-students', async (event, filters) => {
+    return await loadStudents(filters);
+  });
+
+  ipcMain.handle('get-student-by-id', async (event, studentId) => {
+    return await getStudentById(studentId);
+  });
+
+  ipcMain.handle('get-student-by-rfid', async (event, rfid) => {
+    return await getStudentByRFID(rfid);
+  });
+
+  // Attendance operations
+  ipcMain.handle('save-attendance', async (event, records) => {
+    return await saveAttendance(records);
+  });
+
+  ipcMain.handle('load-attendance', async (event, filters) => {
+    return await loadAttendance(filters);
+  });
+
+  ipcMain.handle('get-last-attendance', async (event, studentId, type) => {
+    return await getLastAttendance(studentId, type);
+  });
+
+  // Sync metadata
+  ipcMain.handle('get-sync-metadata', async (event, key) => {
+    return await getSyncMetadata(key);
+  });
+
+  ipcMain.handle('set-sync-metadata', async (event, key, value) => {
+    return await setSyncMetadata(key, value);
+  });
+
+  // Database maintenance
+  ipcMain.handle('vacuum-database', vacuumDatabase);
+  ipcMain.handle('check-integrity', checkIntegrity);
+  ipcMain.handle('get-stats', getStats);
+  ipcMain.handle('clear-all-data', clearAllData);
+  ipcMain.handle('remove-duplicate-attendance', removeDuplicateAttendance);
+
+  // Backup operations
+  ipcMain.handle('create-backup', createBackup);
+  ipcMain.handle('restore-backup', restoreBackup);
+  ipcMain.handle('list-backups', listBackups);
+}
+
+app.whenReady().then(async () => {
+  await initializeApp();
+  setupIpcHandlers();
+  createWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+app.on('before-quit', async (event) => {
+  event.preventDefault();
+  
+  // Create automatic backup before quitting
+  console.log('Creating backup before quit...');
+  await createBackup();
+  
+  app.exit(0);
+});
+```
+
+Key Features:
+- Secure window creation with context isolation
+- IPC handler setup for renderer communication
+- Database encryption initialization
+- Automatic backup on application exit
+- Menu system with diagnostics and maintenance
+- Cross-platform support (Windows, macOS, Linux)
+
+
+2.2 PRELOAD SCRIPT (electron/preload.js)
+-------------------------------------------
+Purpose: Security bridge between renderer and main process
+Lines of Code: 36
+Dependencies: Electron
+
+```javascript
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
+  versions: process.versions,
+  
+  // Student operations
+  saveStudents: (students) => ipcRenderer.invoke('save-students', students),
+  loadStudents: (filters) => ipcRenderer.invoke('load-students', filters),
+  getStudentById: (studentId) => ipcRenderer.invoke('get-student-by-id', studentId),
+  getStudentByRFID: (rfid) => ipcRenderer.invoke('get-student-by-rfid', rfid),
+  
+  // Attendance operations
+  saveAttendance: (records) => ipcRenderer.invoke('save-attendance', records),
+  loadAttendance: (filters) => ipcRenderer.invoke('load-attendance', filters),
+  getLastAttendance: (studentId, type) => ipcRenderer.invoke('get-last-attendance', studentId, type),
+  
+  // Sync metadata
+  getSyncMetadata: (key) => ipcRenderer.invoke('get-sync-metadata', key),
+  setSyncMetadata: (key, value) => ipcRenderer.invoke('set-sync-metadata', key, value),
+  
+  // Database maintenance
+  vacuumDatabase: () => ipcRenderer.invoke('vacuum-database'),
+  checkIntegrity: () => ipcRenderer.invoke('check-integrity'),
+  getStats: () => ipcRenderer.invoke('get-stats'),
+  clearAllData: () => ipcRenderer.invoke('clear-all-data'),
+  removeDuplicateAttendance: () => ipcRenderer.invoke('remove-duplicate-attendance'),
+  
+  // Backup operations
+  createBackup: () => ipcRenderer.invoke('create-backup'),
+  restoreBackup: () => ipcRenderer.invoke('restore-backup'),
+  listBackups: () => ipcRenderer.invoke('list-backups'),
+});
+```
+
+Key Features:
+- Context bridge for secure IPC communication
+- Type-safe API exposure to renderer
+- No direct Node.js access from renderer
+- Follows Electron security best practices
+
+
+===========================================
+3. DATA SERVICES LAYER
+===========================================
+
+3.1 ATTENDANCE SERVICE (src/services/attendanceService.ts)
+-------------------------------------------
+Purpose: Manage attendance records with check-in/check-out logic
+Lines of Code: 245
+Dependencies: Supabase, Storage Manager
+
+```typescript
+import { supabase } from '@/integrations/supabase/client';
+import { AttendanceEntry } from '@/types/AttendanceEntry';
+import { getFromLocalStorage, saveToLocalStorage } from '@/utils/offlineStorage';
+
+const COOLDOWN_PERIOD = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+export const attendanceService = {
+  async recordCheckIn(
+    studentId: string,
+    studentName: string,
+    method: 'rfid' | 'barcode' | 'manual' | 'biometric',
+    library: 'notre-dame' | 'ibed',
+    purpose?: string,
+    contact?: string
+  ): Promise<{ success: boolean; message: string; entry?: AttendanceEntry }> {
+    try {
+      // Check cooldown period
+      const lastEntry = await this.getLastEntry(studentId);
+      if (lastEntry && this.isWithinCooldown(lastEntry.timestamp)) {
+        return {
+          success: false,
+          message: `Please wait ${Math.ceil((COOLDOWN_PERIOD - (Date.now() - new Date(lastEntry.timestamp).getTime())) / 1000)} seconds before scanning again.`
+        };
+      }
+
+      const entry: AttendanceEntry = {
+        id: crypto.randomUUID(),
+        studentId,
+        studentName,
+        timestamp: new Date().toISOString(),
+        method,
+        library,
+        type: 'check-in',
+        purpose,
+        contact,
+        synced: false
+      };
+
+      // Save to local storage first
+      const localData = await getFromLocalStorage();
+      localData.attendanceRecords.push(entry);
+      await saveToLocalStorage(localData);
+
+      // Try to sync to Supabase if online
+      if (navigator.onLine) {
+        try {
+          const { error } = await supabase
+            .from('attendance')
+            .insert([{
+              id: entry.id,
+              student_id: entry.studentId,
+              student_name: entry.studentName,
+              timestamp: entry.timestamp,
+              method: entry.method,
+              library: entry.library,
+              type: entry.type,
+              purpose: entry.purpose,
+              contact: entry.contact
+            }]);
+
+          if (!error) {
+            entry.synced = true;
+            // Update local storage with synced status
+            const updatedData = await getFromLocalStorage();
+            const recordIndex = updatedData.attendanceRecords.findIndex(r => r.id === entry.id);
+            if (recordIndex !== -1) {
+              updatedData.attendanceRecords[recordIndex].synced = true;
+              await saveToLocalStorage(updatedData);
+            }
+          }
+        } catch (syncError) {
+          console.warn('Failed to sync to Supabase, will retry later:', syncError);
+        }
+      }
+
+      return {
+        success: true,
+        message: 'Check-in recorded successfully',
+        entry
+      };
+    } catch (error) {
+      console.error('Check-in error:', error);
+      return {
+        success: false,
+        message: 'Failed to record check-in'
+      };
+    }
+  },
+
+  async recordCheckOut(
+    studentId: string,
+    studentName: string,
+    method: 'rfid' | 'barcode' | 'manual' | 'biometric',
+    library: 'notre-dame' | 'ibed'
+  ): Promise<{ success: boolean; message: string; entry?: AttendanceEntry }> {
+    try {
+      // Verify there's a check-in without check-out
+      const lastEntry = await this.getLastEntry(studentId);
+      if (!lastEntry || lastEntry.type === 'check-out') {
+        return {
+          success: false,
+          message: 'No active check-in found. Please check in first.'
+        };
+      }
+
+      // Check cooldown period
+      if (this.isWithinCooldown(lastEntry.timestamp)) {
+        return {
+          success: false,
+          message: `Please wait ${Math.ceil((COOLDOWN_PERIOD - (Date.now() - new Date(lastEntry.timestamp).getTime())) / 1000)} seconds before scanning again.`
+        };
+      }
+
+      const entry: AttendanceEntry = {
+        id: crypto.randomUUID(),
+        studentId,
+        studentName,
+        timestamp: new Date().toISOString(),
+        method,
+        library,
+        type: 'check-out',
+        synced: false
+      };
+
+      // Save to local storage first
+      const localData = await getFromLocalStorage();
+      localData.attendanceRecords.push(entry);
+      await saveToLocalStorage(localData);
+
+      // Try to sync to Supabase if online
+      if (navigator.onLine) {
+        try {
+          const { error } = await supabase
+            .from('attendance')
+            .insert([{
+              id: entry.id,
+              student_id: entry.studentId,
+              student_name: entry.studentName,
+              timestamp: entry.timestamp,
+              method: entry.method,
+              library: entry.library,
+              type: entry.type
+            }]);
+
+          if (!error) {
+            entry.synced = true;
+            const updatedData = await getFromLocalStorage();
+            const recordIndex = updatedData.attendanceRecords.findIndex(r => r.id === entry.id);
+            if (recordIndex !== -1) {
+              updatedData.attendanceRecords[recordIndex].synced = true;
+              await saveToLocalStorage(updatedData);
+            }
+          }
+        } catch (syncError) {
+          console.warn('Failed to sync to Supabase, will retry later:', syncError);
+        }
+      }
+
+      return {
+        success: true,
+        message: 'Check-out recorded successfully',
+        entry
+      };
+    } catch (error) {
+      console.error('Check-out error:', error);
+      return {
+        success: false,
+        message: 'Failed to record check-out'
+      };
+    }
+  },
+
+  async getLastEntry(studentId: string): Promise<AttendanceEntry | null> {
+    try {
+      const localData = await getFromLocalStorage();
+      const studentRecords = localData.attendanceRecords
+        .filter(r => r.studentId === studentId)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      
+      return studentRecords[0] || null;
+    } catch (error) {
+      console.error('Error getting last entry:', error);
+      return null;
+    }
+  },
+
+  isWithinCooldown(timestamp: string | Date): boolean {
+    const lastTime = new Date(timestamp).getTime();
+    const now = Date.now();
+    return (now - lastTime) < COOLDOWN_PERIOD;
+  },
+
+  async getAllRecords(): Promise<AttendanceEntry[]> {
+    try {
+      const localData = await getFromLocalStorage();
+      return localData.attendanceRecords.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
+    } catch (error) {
+      console.error('Error getting all records:', error);
+      return [];
+    }
+  }
+};
+```
+
+Key Features:
+- 5-minute cooldown period enforcement
+- Offline-first architecture
+- Automatic Supabase synchronization
+- Check-in/check-out validation
+- Multi-library support
+
+
+===========================================
+4. STORAGE MANAGEMENT SYSTEM
+===========================================
+
+4.1 STORAGE MANAGER (src/utils/storage/manager.ts)
+-------------------------------------------
+Purpose: Unified storage interface with driver selection
+Lines of Code: 185
+Dependencies: IndexedDB, SQLite, LocalStorage
+
+```typescript
+import { StorageDriver, OfflineData } from './types';
+import { electronSqliteDriver } from './electronSqliteDriver';
+import { indexedDbStorage } from './indexedDbStorage';
+import { localStorageDriver } from './localStorageDriver';
+
+class StorageManager {
+  private currentDriver: StorageDriver | null = null;
+  private initialized: boolean = false;
+
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    try {
+      // Priority: Electron SQLite > IndexedDB > LocalStorage
+      if (this.isElectron() && await electronSqliteDriver.isAvailable()) {
+        console.log('✅ Using Electron SQLite storage');
+        this.currentDriver = electronSqliteDriver;
+      } else if (await indexedDbStorage.isAvailable()) {
+        console.log('✅ Using IndexedDB storage');
+        this.currentDriver = indexedDbStorage;
+      } else {
+        console.log('⚠️ Falling back to LocalStorage');
+        this.currentDriver = localStorageDriver;
+      }
+
+      await this.currentDriver.initialize();
+      this.initialized = true;
+    } catch (error) {
+      console.error('❌ Storage initialization failed:', error);
+      console.log('⚠️ Using LocalStorage fallback');
+      this.currentDriver = localStorageDriver;
+      await this.currentDriver.initialize();
+      this.initialized = true;
+    }
+  }
+
+  async save(data: Partial<OfflineData>): Promise<void> {
+    await this.ensureInitialized();
+    await this.currentDriver!.save(data);
+  }
+
+  async load(): Promise<OfflineData> {
+    await this.ensureInitialized();
+    return await this.currentDriver!.load();
+  }
+
+  async clear(): Promise<void> {
+    await this.ensureInitialized();
+    await this.currentDriver!.clear();
+  }
+
+  getCurrentDriverName(): string {
+    if (!this.currentDriver) return 'Not initialized';
+    
+    if (this.currentDriver === electronSqliteDriver) return 'SQLite (Encrypted)';
+    if (this.currentDriver === indexedDbStorage) return 'IndexedDB';
+    return 'LocalStorage';
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+  }
+
+  private isElectron(): boolean {
+    return typeof window !== 'undefined' && 
+           window.electronAPI !== undefined;
+  }
+}
+
+export const storageManager = new StorageManager();
+```
+
+Key Features:
+- Automatic driver selection based on environment
+- Graceful fallback mechanism
+- Unified interface for all storage types
+- Lazy initialization
+
+
+4.2 ELECTRON SQLITE DRIVER (src/utils/storage/electronSqliteDriver.ts)
+-------------------------------------------
+Purpose: SQLite driver with encryption for Electron
+Lines of Code: 215
+Dependencies: Electron IPC, Better-SQLite3
+
+```typescript
+import { StorageDriver, OfflineData } from './types';
+
+export const electronSqliteDriver: StorageDriver = {
+  async initialize(): Promise<void> {
+    if (!window.electronAPI) {
+      throw new Error('Electron API not available');
+    }
+    
+    console.log('✅ SQLite driver initialized (encrypted)');
+  },
+
+  async isAvailable(): Promise<boolean> {
+    return typeof window !== 'undefined' && 
+           window.electronAPI !== undefined;
+  },
+
+  async save(data: Partial<OfflineData>): Promise<void> {
+    try {
+      // Save students
+      if (data.students && data.students.length > 0) {
+        const result = await window.electronAPI.saveStudents(data.students);
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to save students');
+        }
+        console.log(`💾 Saved ${result.count} students to encrypted SQLite`);
+      }
+
+      // Save attendance records
+      if (data.attendanceRecords && data.attendanceRecords.length > 0) {
+        const result = await window.electronAPI.saveAttendance(data.attendanceRecords);
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to save attendance');
+        }
+        console.log(`💾 Saved ${result.count} attendance records to encrypted SQLite`);
+      }
+
+      // Save sync metadata
+      if (data.lastSync) {
+        await window.electronAPI.setSyncMetadata('lastSync', data.lastSync);
+      }
+    } catch (error) {
+      console.error('❌ SQLite save error:', error);
+      throw error;
+    }
+  },
+
+  async load(): Promise<OfflineData> {
+    try {
+      // Load students
+      const studentsResult = await window.electronAPI.loadStudents({});
+      const students = studentsResult.success ? studentsResult.data || [] : [];
+
+      // Load attendance (last 30 days)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const attendanceResult = await window.electronAPI.loadAttendance({
+        fromDate: thirtyDaysAgo.toISOString()
+      });
+      const attendanceRecords = attendanceResult.success ? attendanceResult.data || [] : [];
+
+      // Load sync metadata
+      const syncResult = await window.electronAPI.getSyncMetadata('lastSync');
+      const lastSync = syncResult.success ? syncResult.data : null;
+
+      console.log(`📖 Loaded ${students.length} students and ${attendanceRecords.length} attendance records from encrypted SQLite`);
+
+      return {
+        students,
+        attendanceRecords,
+        documents: [],
+        lastSync
+      };
+    } catch (error) {
+      console.error('❌ SQLite load error:', error);
+      return {
+        students: [],
+        attendanceRecords: [],
+        documents: [],
+        lastSync: null
+      };
+    }
+  },
+
+  async clear(): Promise<void> {
+    try {
+      const result = await window.electronAPI.clearAllData();
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to clear data');
+      }
+      console.log('🗑️ Cleared all data from encrypted SQLite');
+    } catch (error) {
+      console.error('❌ SQLite clear error:', error);
+      throw error;
+    }
+  }
+};
+```
+
+Key Features:
+- AES-256-GCM encryption integration
+- Efficient batch operations
+- Automatic data filtering (last 30 days)
+- Error handling and logging
+
+
+===========================================
+5. KEY COMPONENTS
+===========================================
+
+5.1 RFID SCANNER (src/components/RFIDScanner.tsx)
+-------------------------------------------
+Purpose: RFID tag reading with USB device support
+Lines of Code: 185
+Dependencies: Web Serial API, USB API
+
+[Component implementation details...]
+
+
+===========================================
+7. TYPE DEFINITIONS
+===========================================
+
+7.1 STUDENT TYPE (src/types/Student.ts)
+-------------------------------------------
+Purpose: Student data model with multi-institution support
+Lines of Code: 23
+
+```typescript
+export interface Student {
+  id: string;
+  name: string;
+  studentId: string;
+  email?: string;
+  department?: string;
+  course?: string;
+  year?: string;
+  level?: 'elementary' | 'junior-high' | 'senior-high' | 'college' | 'graduated' | 'transferred-out';
+  shift?: 'morning' | 'afternoon'; // For SHS students
+  strand?: string; // For SHS students (Grade 11-12)
+  lastScan?: Date;
+  profilePicture?: string;
+  biometricData?: string;
+  barcode?: string;
+  rfid?: string; // RFID data for check-in/check-out
+  contactNumber?: string;
+  registrationDate?: Date;
+  library?: 'notre-dame' | 'ibed'; // Multi-library support
+  userType?: 'student' | 'teacher'; // User type
+  studentType?: 'ibed' | 'college'; // Student category
+}
+```
+
+Key Features:
+- Support for multiple educational levels
+- Multi-library configuration
+- Multiple identification methods
+- Flexible user categorization
+
+
+7.2 ATTENDANCE ENTRY TYPE (src/types/AttendanceEntry.ts)
+-------------------------------------------
+Purpose: Attendance record data model
+
+```typescript
+export interface AttendanceEntry {
+  id: string;
+  studentId: string;
+  studentName: string;
+  timestamp: string | Date;
+  method: 'rfid' | 'barcode' | 'manual' | 'biometric';
+  library: 'notre-dame' | 'ibed';
+  type: 'check-in' | 'check-out';
+  purpose?: string;
+  contact?: string;
+  synced: boolean;
+}
+```
+
+
+===========================================
+8. UTILITY FUNCTIONS
+===========================================
+
+8.1 EXPORT UTILITIES (src/utils/exportUtils.ts)
+-------------------------------------------
+Purpose: Data export in multiple formats
+Lines of Code: 70
+
+```typescript
+import { Student } from '@/types/Student';
+import { AttendanceEntry } from '@/types/AttendanceEntry';
+
+export const convertToCSV = (
+  filteredStudents: Student[], 
+  filteredRecords: AttendanceEntry[]
+) => {
+  // CSV generation logic
+  const studentHeaders = ['ID', 'Name', 'Student ID', 'Email', 'Department', 'Level', 'Shift'];
+  const studentRows = filteredStudents.map((student: Student) => [
+    student.id,
+    student.name,
+    student.studentId,
+    student.email || '',
+    student.department || '',
+    student.level || '',
+    student.shift || ''
+  ]);
+  
+  const attendanceHeaders = ['ID', 'Student Name', 'Student ID', 'Timestamp', 'Method', 'Purpose', 'Contact'];
+  const attendanceRows = filteredRecords.map((record: AttendanceEntry) => [
+    record.id,
+    record.studentName,
+    record.studentId,
+    new Date(record.timestamp).toISOString(),
+    record.method,
+    record.purpose || '',
+    record.contact || ''
+  ]);
+
+  const studentCSV = [studentHeaders, ...studentRows].map(row => row.join(',')).join('\n');
+  const attendanceCSV = [attendanceHeaders, ...attendanceRows].map(row => row.join(',')).join('\n');
+  
+  return `STUDENTS\n${studentCSV}\n\nATTENDANCE\n${attendanceCSV}`;
+};
+```
+
+
+===========================================
+9. CONFIGURATION FILES
+===========================================
+
+9.1 ELECTRON BUILDER CONFIGURATION
+-------------------------------------------
+Purpose: Application packaging configuration
+
+```json
+{
+  "appId": "com.library.attendance",
+  "productName": "Library Attendance System",
+  "directories": {
+    "output": "dist-electron",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": ["nsis"],
+    "icon": "public/favicon.ico"
+  },
+  "mac": {
+    "target": ["dmg"],
+    "icon": "public/icon.icns",
+    "category": "public.app-category.education"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "icon": "public/icon.png",
+    "category": "Education"
+  }
+}
+```
+
+
+===========================================
+10. BUILD AND DEPLOYMENT
+===========================================
+
+10.1 BUILD INSTRUCTIONS
+-------------------------------------------
+
+Web Application:
+```bash
+npm install
+npm run build
+npm run preview
+```
+
+Desktop Application (Electron):
+```bash
+# Windows
+npm run electron:build:win
+
+# macOS
+npm run electron:build:mac
+
+# Linux
+npm run electron:build:linux
+```
+
+Mobile Application (Capacitor):
+```bash
+# Android
+npm run build
+npx cap sync android
+npx cap open android
+
+# iOS
+npm run build
+npx cap sync ios
+npx cap open ios
+```
+
+
+10.2 PACKAGE DEPENDENCIES
+-------------------------------------------
+
+Core Dependencies:
+- React 18.3.1
+- TypeScript 5.x
+- Vite 5.x
+- Electron 37.2.3
+- Better-SQLite3 12.4.1
+- Supabase JS 2.76.1
+- React Router DOM 6.26.2
+- TanStack React Query 5.56.2
+
+UI Libraries:
+- Radix UI (complete component library)
+- Tailwind CSS 3.x
+- Lucide React (icons)
+- Recharts (analytics)
+
+Utilities:
+- XLSX 0.18.5 (Excel export)
+- OTPAuth 9.4.1 (2FA)
+- QRCode 1.5.4
+- ZXing Library 0.21.3 (barcode scanning)
+- Date-fns 3.6.0
+
+
+===========================================
+APPENDIX A - END OF DOCUMENTATION
+===========================================
+
+Total Lines of Code: ~15,000
+Total Files: 100+
+Programming Languages: TypeScript, JavaScript
+Architecture: Offline-First, Progressive Web App
+Security: AES-256-GCM Encryption, TOTP 2FA
+Database: Supabase (PostgreSQL), SQLite (Local)
+Platforms: Web, Desktop (Windows/Mac/Linux), Mobile (iOS/Android)
+
+This source code documentation provides a comprehensive overview of the
+Library Attendance Management System implementation. All source code is
+production-ready and follows industry best practices for security,
+performance, and maintainability.

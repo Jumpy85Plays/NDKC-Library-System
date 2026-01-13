@@ -1,0 +1,1651 @@
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Calendar as CalendarComponent } from '@/components/ui/calendar';
+import { cn } from '@/lib/utils';
+import { 
+  UserPlus, 
+  Edit2, 
+  Trash2, 
+  Download, 
+  Calendar, 
+  CalendarIcon,
+  BarChart3, 
+  TrendingUp,
+  RefreshCw,
+  Search,
+  RotateCcw,
+  Shield,
+  Activity,
+  Clock,
+  Users,
+  Loader2,
+  Database
+} from 'lucide-react';
+import BackButton from '@/components/BackButton';
+import RFIDDataManager from '@/components/RFIDDataManager';
+// Import StudentRegistration component
+import StudentRegistration from '@/components/StudentRegistration';
+import ThesisDatabaseManager from '@/components/ThesisDatabaseManager';
+import { attendanceService } from '@/services/attendanceService';
+import { supabaseService } from '@/services/supabaseService';
+import { supabase } from '@/integrations/supabase/client';
+import { Student } from '@/types/Student';
+import { AttendanceEntry } from '@/types/AttendanceEntry';
+import { deduplicateAttendance } from '@/utils/deduplicateAttendance';
+import { toast } from '@/components/ui/use-toast';
+import { format, startOfDay, endOfDay, subDays, subWeeks, subMonths, startOfMonth, endOfMonth, startOfWeek, startOfYear } from 'date-fns';
+import { ChartTimeSeries, ChartCourseDistribution } from '@/components/analytics/ReportCharts';
+import StudentPagination from '@/components/StudentPagination';
+import AttendanceTable from '@/components/AttendanceTable';
+import { convertToCSV, calculateTimeSpent, convertTimeSpentToCSV } from '@/utils/exportUtils';
+import { exportToPDF, exportCategorySummaryToPDF } from '@/utils/pdfExport';
+import { backupService } from '@/services/backupService';
+
+
+const EnhancedAdminPage = () => {
+  const [students, setStudents] = useState<Student[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [activeTab, setActiveTab] = useState('add-student');
+  const [courseFilter, setCourseFilter] = useState<string>('all');
+  const [yearFilter, setYearFilter] = useState<string>('all');
+  const [userTypeFilter, setUserTypeFilter] = useState<string>('all');
+  const [studentTypeFilter, setStudentTypeFilter] = useState<string>('all');
+  const [studentPage, setStudentPage] = useState(1);
+  const [studentsPerPage, setStudentsPerPage] = useState(25);
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  
+  const [newStudent, setNewStudent] = useState({
+    name: '',
+    studentId: '',
+    email: '',
+    course: '',
+    year: '',
+    contactNumber: '',
+    rfid: ''
+  });
+  
+  
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+
+  const deriveStudentDefaults = (s: Student): Student => {
+    const out = { ...s } as any;
+    // Derive level from course/department text when missing
+    const source = (s.course || s.department || '').toLowerCase();
+    if (!out.level) {
+      if (source.includes('senior-high')) out.level = 'senior-high';
+      else if (source.includes('junior-high')) out.level = 'junior-high';
+      else if (source.includes('elementary')) out.level = 'elementary';
+      else if (source.includes('college')) out.level = 'college';
+    }
+    // Derive strand from "senior-high - STRAND" pattern
+    if (!out.strand && /senior-high\s*-\s*/i.test(source)) {
+      out.strand = (s.course || s.department || '').split(/senior-high\s*-\s*/i)[1] || undefined;
+    }
+    return out as Student;
+  };
+  const [reportFilter, setReportFilter] = useState({
+    period: 'today',
+    userType: 'all',
+    studentType: 'all',
+    course: 'all',
+    year: 'all',
+    gradeLevel: 'all',
+    strand: 'all',
+    reportType: 'attendance',
+    exportFormat: 'csv'
+  });
+  const [customStartDate, setCustomStartDate] = useState<Date | undefined>(undefined);
+  const [customEndDate, setCustomEndDate] = useState<Date | undefined>(undefined);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      const [studentsData, attendanceData] = await Promise.all([
+        supabaseService.getStudents(),
+        attendanceService.getAttendanceRecords()
+      ]);
+
+      setStudents(studentsData);
+      setAttendanceRecords(attendanceData);
+      
+      const unsyncedRecords = attendanceData.filter(r => r.id?.toString().startsWith('local_'));
+      if (unsyncedRecords.length > 0) {
+        toast({
+          title: "Sync Status",
+          description: `${unsyncedRecords.length} records are pending sync to server`,
+          variant: "default",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to load data",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddStudent = async () => {
+    try {
+      if (!newStudent.name || !newStudent.studentId || !newStudent.email || !newStudent.course || !newStudent.year || !newStudent.contactNumber) {
+        toast({
+          title: "Error",
+          description: "Name, Student ID, Email, Course, Year, and Contact Number are required",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const studentData: Omit<Student, 'id'> = {
+        ...newStudent,
+        registrationDate: new Date(),
+      };
+
+      await supabaseService.addStudent(studentData);
+      
+      toast({
+        title: "Success",
+        description: "Student added successfully",
+      });
+
+      setNewStudent({
+        name: '',
+        studentId: '',
+        email: '',
+        course: '',
+        year: '',
+        contactNumber: '',
+        rfid: ''
+      });
+      loadData();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to add student",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleEditStudent = async () => {
+    try {
+      if (!editingStudent) return;
+
+      await supabaseService.updateStudent(editingStudent.id, editingStudent);
+      
+      toast({
+        title: "Success",
+        description: "Student updated successfully",
+      });
+
+      setEditingStudent(null);
+      loadData();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to update student",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDeleteStudent = async (studentId: string) => {
+    if (!confirm('Are you sure you want to delete this student?')) return;
+    
+    try {
+      await supabaseService.deleteStudent(studentId);
+      toast({
+        title: "Success",
+        description: "Student deleted successfully",
+      });
+      loadData();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to delete student",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleSupabaseBackup = async () => {
+    setIsBackingUp(true);
+    try {
+      toast({ 
+        title: "Starting backup...", 
+        description: "Downloading data from Supabase" 
+      });
+      
+      const sqliteBlob = await backupService.createSupabaseBackup();
+      const filename = backupService.generateBackupFilename();
+      
+      const url = URL.createObjectURL(sqliteBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      toast({
+        title: "Backup Complete!",
+        description: `Downloaded as ${filename}`,
+      });
+    } catch (error: any) {
+      console.error('Backup error:', error);
+      toast({
+        title: "Backup Failed",
+        description: error.message || "Failed to create backup",
+        variant: "destructive",
+      });
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
+  const getFilteredRecords = () => {
+    let filtered = attendanceRecords;
+    const now = new Date();
+
+    switch (reportFilter.period) {
+      case 'today':
+        filtered = filtered.filter(record => 
+          new Date(record.timestamp) >= startOfDay(now) &&
+          new Date(record.timestamp) <= endOfDay(now)
+        );
+        break;
+      case 'yesterday':
+        const yesterday = subDays(now, 1);
+        filtered = filtered.filter(record => 
+          new Date(record.timestamp) >= startOfDay(yesterday) &&
+          new Date(record.timestamp) <= endOfDay(yesterday)
+        );
+        break;
+      case 'week':
+        filtered = filtered.filter(record => 
+          new Date(record.timestamp) >= startOfWeek(now)
+        );
+        break;
+      case 'month':
+        filtered = filtered.filter(record => 
+          new Date(record.timestamp) >= startOfMonth(now)
+        );
+        break;
+      case 'custom':
+        if (customStartDate && customEndDate) {
+          filtered = filtered.filter(record => {
+            const recordDate = new Date(record.timestamp);
+            return recordDate >= startOfDay(customStartDate) && recordDate <= endOfDay(customEndDate);
+          });
+        }
+        break;
+    }
+
+    // Filter by user type
+    if (reportFilter.userType && reportFilter.userType !== "all") {
+      if (reportFilter.userType === "visitor") {
+        filtered = filtered.filter(record => record.studentId === 'VISITOR');
+      } else if (reportFilter.userType === "student") {
+        filtered = filtered.filter(record => record.studentId !== 'VISITOR' && record.purpose !== 'Teacher');
+      } else if (reportFilter.userType === "teacher") {
+        filtered = filtered.filter(record => record.purpose === 'Teacher');
+      }
+    }
+
+    // Filter by student type, course, year, strand, grade level
+    if (reportFilter.userType === 'student') {
+      filtered = filtered.filter(record => {
+        const student = students.find(s => s.studentId === record.studentId);
+        if (!student) return false;
+        
+        // Filter by student type (college/ibed)
+        if (reportFilter.studentType !== 'all' && student.studentType !== reportFilter.studentType) {
+          return false;
+        }
+        
+        // Filter by year (for college students)
+        if (reportFilter.year && reportFilter.year !== 'all' && student.year !== reportFilter.year) {
+          return false;
+        }
+        
+        // Filter by course (for college students)
+        if (reportFilter.course && reportFilter.course !== 'all' && student.course !== reportFilter.course) {
+          return false;
+        }
+        
+        // Filter by grade level (for IBED students)
+        if (reportFilter.gradeLevel && reportFilter.gradeLevel !== 'all' && student.year !== reportFilter.gradeLevel) {
+          return false;
+        }
+        
+        // Filter by strand (for IBED students)
+        if (reportFilter.strand && reportFilter.strand !== 'all' && student.strand !== reportFilter.strand) {
+          return false;
+        }
+        
+        return true;
+      });
+    }
+
+    return filtered;
+  };
+
+  // Fetch full data from Supabase for reports (bypasses local 30-day limitation)
+  const fetchFullRecordsForReport = async () => {
+    const now = new Date();
+    let startDate: Date;
+
+    switch (reportFilter.period) {
+      case 'today':
+        startDate = startOfDay(now);
+        break;
+      case 'yesterday':
+        const yesterday = subDays(now, 1);
+        startDate = startOfDay(yesterday);
+        break;
+      case 'week':
+        startDate = startOfWeek(now);
+        break;
+      case 'month':
+        startDate = startOfMonth(now);
+        break;
+      case 'custom':
+        startDate = customStartDate ? startOfDay(customStartDate) : subDays(now, 30);
+        break;
+      default:
+        startDate = new Date(0);
+    }
+
+    // Fix timezone issues - ensure we're querying from midnight local time
+    startDate.setHours(0, 0, 0, 0);
+    const endDate = reportFilter.period === 'custom' && customEndDate 
+      ? endOfDay(customEndDate) 
+      : new Date(now);
+    endDate.setHours(23, 59, 59, 999);
+
+    // Debug logging
+    console.log('🔍 Report Period:', reportFilter.period);
+    console.log('📅 Start Date (Local):', startDate.toLocaleString());
+    console.log('📅 Start Date (ISO/UTC):', startDate.toISOString());
+    console.log('📅 End Date (Local):', endDate.toLocaleString());
+    console.log('📅 End Date (ISO/UTC):', endDate.toISOString());
+
+    // Query Supabase with pagination to fetch ALL records (no 1000 limit)
+    let allRecords: any[] = [];
+    let from = 0;
+    const batchSize = 1000;
+    let hasMore = true;
+
+    console.log('📥 Starting paginated fetch from Supabase...');
+
+    while (hasMore) {
+      const { data, error, count } = await supabase
+        .from('attendance_records')
+        .select('*', { count: 'exact' })
+        .gte('timestamp', startDate.toISOString())
+        .lte('timestamp', endDate.toISOString())
+        .order('timestamp', { ascending: false })
+        .range(from, from + batchSize - 1);
+
+      if (error) {
+        console.error('❌ Error fetching attendance records:', error);
+        toast({
+          title: "Report Warning",
+          description: "Could not fetch all data from database. Using cached data.",
+          variant: "destructive",
+        });
+        // Fallback to local data if Supabase query fails
+        return getFilteredRecords();
+      }
+
+      if (data && data.length > 0) {
+        allRecords = [...allRecords, ...data];
+        console.log(`📦 Batch ${Math.floor(from/batchSize) + 1}: Fetched ${data.length} records (Total so far: ${allRecords.length}${count ? `/${count}` : ''})`);
+        from += batchSize;
+        hasMore = data.length === batchSize;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    console.log(`✅ Pagination complete: ${allRecords.length} total records fetched from Supabase`);
+
+    // Map Supabase response (snake_case) to AttendanceEntry format (camelCase)
+    let filtered: AttendanceEntry[] = (allRecords || []).map((record: any) => ({
+      id: record.id,
+      studentDatabaseId: record.student_database_id,
+      studentId: record.student_id,
+      studentName: record.student_name,
+      timestamp: new Date(record.timestamp),
+      type: record.type,
+      barcode: record.barcode,
+      method: record.method,
+      purpose: record.purpose,
+      contact: record.contact,
+      library: record.library,
+      course: record.course,
+      year: record.year,
+      userType: record.user_type,
+      studentType: record.student_type,
+      level: record.level,
+      strand: record.strand,
+    }));
+
+    // Deduplicate records BEFORE applying filters
+    console.log(`📊 Records before deduplication: ${filtered.length}`);
+    filtered = deduplicateAttendance(filtered);
+    console.log(`✨ Records after deduplication: ${filtered.length} (removed ${allRecords.length - filtered.length} duplicates)`);
+
+    // Apply user type filters
+    if (reportFilter.userType && reportFilter.userType !== "all") {
+      if (reportFilter.userType === "visitor") {
+        filtered = filtered.filter(record => record.studentId === 'VISITOR');
+      } else if (reportFilter.userType === "student") {
+        filtered = filtered.filter(record => record.studentId !== 'VISITOR' && record.purpose !== 'Teacher');
+      } else if (reportFilter.userType === "teacher") {
+        filtered = filtered.filter(record => record.purpose === 'Teacher');
+      }
+    }
+
+    // Apply additional filters
+    if (reportFilter.studentType && reportFilter.studentType !== "all") {
+      filtered = filtered.filter(record => {
+        const student = students.find(s => s.studentId === record.studentId);
+        return student?.studentType === reportFilter.studentType;
+      });
+    }
+
+    if (reportFilter.userType === "student" && students.length > 0) {
+      filtered = filtered.filter(record => {
+        const student = students.find(s => s.studentId === record.studentId);
+        if (!student) return false;
+        
+        if (reportFilter.year && reportFilter.year !== 'all' && student.year !== reportFilter.year) {
+          return false;
+        }
+        
+        if (reportFilter.course && reportFilter.course !== 'all' && student.course !== reportFilter.course) {
+          return false;
+        }
+        
+        if (reportFilter.gradeLevel && reportFilter.gradeLevel !== 'all' && student.year !== reportFilter.gradeLevel) {
+          return false;
+        }
+        
+        if (reportFilter.strand && reportFilter.strand !== 'all' && student.strand !== reportFilter.strand) {
+          return false;
+        }
+        
+        return true;
+      });
+    }
+
+    return filtered;
+  };
+
+  const generateAdvancedReport = async () => {
+    toast({
+      title: "Generating report...",
+      description: "Loading records from database",
+    });
+
+    const filteredRecords = await fetchFullRecordsForReport();
+    
+    console.log(`✅ Report ready: ${filteredRecords.length} records`);
+    const filteredStudents = students.filter(s => {
+      if (reportFilter.userType === 'student') {
+        if (reportFilter.studentType !== 'all' && s.studentType !== reportFilter.studentType) return false;
+        if (reportFilter.year !== 'all' && s.year !== reportFilter.year) return false;
+        if (reportFilter.course !== 'all' && s.course !== reportFilter.course) return false;
+        if (reportFilter.gradeLevel !== 'all' && s.year !== reportFilter.gradeLevel) return false;
+        if (reportFilter.strand !== 'all' && s.strand !== reportFilter.strand) return false;
+      }
+      return true;
+    });
+
+    // Handle PDF export
+    if (reportFilter.exportFormat === 'pdf') {
+      try {
+        // Handle Category Summary report separately
+        if (reportFilter.reportType === 'category-summary') {
+          await exportCategorySummaryToPDF(filteredRecords, {
+            timePeriod: reportFilter.period,
+            customStartDate: customStartDate,
+            customEndDate: customEndDate,
+          });
+        } else {
+          await exportToPDF(filteredStudents, filteredRecords, {
+            reportType: reportFilter.reportType === 'time-spent' ? 'Time Spent' : 
+                        reportFilter.reportType === 'analytics' ? 'Analytics Report' : 'Attendance Report',
+            timePeriod: reportFilter.period,
+            studentType: reportFilter.studentType !== 'all' ? reportFilter.studentType : undefined,
+            yearLevel: reportFilter.year !== 'all' ? reportFilter.year : undefined,
+            course: reportFilter.course !== 'all' ? reportFilter.course : undefined,
+            customStartDate: customStartDate,
+            customEndDate: customEndDate,
+          });
+        }
+        
+        toast({
+          title: "Success",
+          description: "PDF report exported successfully",
+        });
+      } catch (error) {
+        toast({
+          title: "Export Failed",
+          description: "Failed to generate PDF report",
+          variant: "destructive",
+        });
+      }
+      return;
+    }
+    
+    // Helper function to determine user type
+    const getUserType = (record: AttendanceEntry) => {
+      if (record.studentId === 'VISITOR') return 'Visitor';
+      if (record.purpose === 'Teacher') return 'Teacher';
+      return 'Student';
+    };
+
+    // Helper function to determine category (COLLEGE/IBED/TEACHER/VISITOR)
+    const getUserCategory = (record: AttendanceEntry) => {
+      if (record.studentId === 'VISITOR') return 'VISITOR';
+      if (record.userType === 'teacher') return 'TEACHER';
+      if (record.userType === 'student') {
+        return record.studentType === 'ibed' ? 'IBED' : 'COLLEGE';
+      }
+      return 'N/A';
+    };
+    
+    if (reportFilter.reportType === 'time-spent') {
+      const timeSpentData = calculateTimeSpent(filteredStudents, filteredRecords);
+      
+      if (reportFilter.exportFormat === 'csv') {
+        const csvContent = convertTimeSpentToCSV(timeSpentData);
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `library-time-spent-${reportFilter.period}-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        // XLSX export
+        const { exportXLSX } = await import('@/utils/xlsxExport');
+        const headers = ['Student ID', 'Name', 'Course', 'Total Minutes', 'Total Hours'];
+        const rows = timeSpentData.map(row => [
+          row.studentId,
+          row.name,
+          row.course,
+          row.totalMinutes,
+          row.totalHours
+        ]);
+        exportXLSX({
+          sheetName: 'Time Spent',
+          headers,
+          rows,
+          filename: `library-time-spent-${reportFilter.period}-${format(new Date(), 'yyyy-MM-dd')}`,
+          colWidths: [16, 28, 20, 14, 14]
+        });
+      }
+    } else if (reportFilter.reportType === 'analytics') {
+      const uniqueStudents = new Set(filteredRecords.map(r => r.studentId)).size;
+      const visitors = filteredRecords.filter(r => r.studentId === 'VISITOR').length;
+      const avgVisitsPerDay = filteredRecords.length / 
+        (reportFilter.period === 'today' ? 1 : 
+         reportFilter.period === 'week' ? 7 : 30);
+
+      // Export to XLSX to avoid column overlap in spreadsheet apps
+      const { exportXLSX } = await import('@/utils/xlsxExport');
+      const headers = ['Student Name', 'Student ID', 'Date', 'Time', 'User Type', 'Category'];
+      const rows = filteredRecords.map(record => [
+        record.studentName,
+        record.studentId,
+        format(new Date(record.timestamp), 'yyyy-MM-dd'),
+        format(new Date(record.timestamp), 'HH:mm:ss'),
+        getUserType(record),
+        getUserCategory(record)
+      ]);
+      exportXLSX({
+        sheetName: 'Analytics',
+        headers,
+        rows,
+        filename: `library-analytics-${reportFilter.period}-${format(new Date(), 'yyyy-MM-dd')}`,
+        colWidths: [28, 16, 14, 12, 14, 14]
+      });
+    } else {
+      const { exportXLSX } = await import('@/utils/xlsxExport');
+      const headers = ['Student Name', 'Date', 'Time', 'Category', 'Course', 'Year', 'Strand', 'Purpose', 'Contact'];
+      const rows = filteredRecords.map(record => [
+        record.studentName.toUpperCase(),
+        format(new Date(record.timestamp), 'MMM dd, yyyy'),
+        format(new Date(record.timestamp), 'HH:mm:ss'),
+        getUserCategory(record),
+        record.course || '',
+        record.year || '',
+        record.strand || '',
+        record.purpose || 'Library Visit',
+        record.studentId === 'VISITOR' ? (record.contact || 'N/A') : 'Private'
+      ]);
+      exportXLSX({
+        sheetName: 'Attendance',
+        headers,
+        rows,
+        filename: `library-attendance-${reportFilter.period}-${format(new Date(), 'yyyy-MM-dd')}`,
+        colWidths: [28, 14, 12, 14, 18, 12, 18, 18, 14]
+      });
+    }
+
+    // Success feedback with details
+    const periodLabel = reportFilter.period === 'today' ? 'today' : 
+                       reportFilter.period === 'week' ? 'this week' :
+                       reportFilter.period === 'month' ? 'this month' : 
+                       reportFilter.period === 'yesterday' ? 'yesterday' : 'the selected period';
+    
+    toast({
+      title: "Report Exported!",
+      description: `Exported ${filteredRecords.length} records from ${periodLabel}`,
+    });
+  };
+
+  // Get dynamic year options based on student type
+  const getYearOptions = () => {
+    if (studentTypeFilter === 'ibed') {
+      return ['Kinder', 'Grade 1', 'Grade 2', 'Grade 3', 'Grade 4', 'Grade 5', 'Grade 6', 'Grade 7', 'Grade 8', 'Grade 9', 'Grade 10', 'Grade 11', 'Grade 12'];
+    } else if (studentTypeFilter === 'college') {
+      return ['1st Year', '2nd Year', '3rd Year', '4th Year'];
+    } else {
+      return [...new Set(students.map(s => (s.year || '').trim()).filter(Boolean))];
+    }
+  };
+
+  const filteredStudents = students
+    .filter(student =>
+      student.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      student.studentId.toLowerCase().includes(searchTerm.toLowerCase())
+    )
+    .filter(student => (courseFilter === 'all' || (student.course || student.department || '').toLowerCase() === courseFilter.toLowerCase()))
+    .filter(student => (yearFilter === 'all' || (student.year || '').toLowerCase() === yearFilter.toLowerCase()))
+    .filter(student => {
+      if (userTypeFilter === 'all') return true;
+      if (userTypeFilter === 'teacher') return student.userType === 'teacher';
+      if (userTypeFilter === 'student') {
+        if (studentTypeFilter === 'all') return student.userType === 'student';
+        if (studentTypeFilter === 'college') return student.userType === 'student' && student.studentType === 'college';
+        if (studentTypeFilter === 'ibed') return student.userType === 'student' && student.studentType === 'ibed';
+      }
+      return true;
+    });
+
+  // Pagination logic
+  const totalPages = Math.ceil(filteredStudents.length / studentsPerPage);
+  const startIndex = (studentPage - 1) * studentsPerPage;
+  const endIndex = startIndex + studentsPerPage;
+  const paginatedStudents = filteredStudents.slice(startIndex, endIndex);
+
+  const todayRecords = attendanceRecords.filter(record => 
+    new Date(record.timestamp).toDateString() === new Date().toDateString()
+  );
+  const uniqueStudentsToday = new Set(todayRecords.map(r => r.studentId)).size;
+  const visitorsToday = todayRecords.filter(r => r.studentId === 'VISITOR').length;
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-4 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary mx-auto"></div>
+          <p className="mt-4 text-lg">Loading admin panel...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-2 sm:p-6 overflow-y-auto">
+      <div className="w-full px-2 sm:px-4 pb-8">
+        <div className="mb-2 sm:mb-4 flex-shrink-0">
+          <BackButton to="/" />
+        </div>
+        
+        <div className="mb-4 sm:mb-6 flex-shrink-0">
+          <div className="text-center mb-3 sm:mb-6">
+            <h1 className="text-2xl sm:text-4xl font-bold text-gray-800 flex items-center justify-center gap-2 sm:gap-3 mb-2">
+              <Shield className="h-6 w-6 sm:h-10 sm:w-10" />
+              Enhanced Admin Panel
+            </h1>
+            <p className="text-sm sm:text-xl text-gray-600">Complete System Management & Analytics</p>
+          </div>
+          
+          <Card className="shadow-sm border-0 bg-white/60 backdrop-blur-sm">
+            <CardContent className="py-2 sm:py-4">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                <div className="flex items-center gap-2 text-xs sm:text-sm text-gray-600">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                  <span>System Online</span>
+                  <span className="text-gray-400 hidden sm:inline">•</span>
+                  <span className="hidden sm:inline">Auto-sync every 10s</span>
+                </div>
+                
+                <div className="flex gap-1 sm:gap-2 flex-wrap">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={loadData}
+                    disabled={loading}
+                    className="gap-2"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </Button>
+                  
+                  <Button 
+                    onClick={() => {
+                      import('@/utils/dataIntegrityCheck').then(module => {
+                        module.logDataIntegrityReport().then(report => {
+                          toast({
+                            title: "Data Integrity Check",
+                            description: `Local: ${report.localRecords}, Server: ${report.supabaseRecords}, Unsynced: ${report.unsyncedRecords}`,
+                          });
+                        });
+                      });
+                    }} 
+                    variant="ghost" 
+                    size="sm"
+                    className="gap-2"
+                  >
+                    <Search className="h-4 w-4" />
+                    Check Data
+                  </Button>
+                  
+                  <Button 
+                    onClick={async () => {
+                      try {
+                        const { autoSyncService } = await import('@/services/autoSyncService');
+                        await autoSyncService.forceSync();
+                        await loadData();
+                        toast({
+                          title: "Sync Complete",
+                          description: "All data has been synchronized with the server",
+                        });
+                      } catch (error) {
+                        toast({
+                          title: "Sync Failed", 
+                          description: "Could not sync data to server",
+                          variant: "destructive"
+                        });
+                      }
+                    }} 
+                    variant="ghost" 
+                    size="sm"
+                    className="gap-2"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    Force Sync
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-4 mb-4 sm:mb-6 flex-shrink-0">
+          <Card className="bg-green-500 text-white">
+            <CardContent className="p-2 sm:p-4 text-center">
+              <div className="text-xl sm:text-2xl font-bold">{todayRecords.length}</div>
+              <p className="text-xs sm:text-sm">Today's Visits</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-blue-500 text-white">
+            <CardContent className="p-2 sm:p-4 text-center">
+              <div className="text-xl sm:text-2xl font-bold">{uniqueStudentsToday}</div>
+              <p className="text-xs sm:text-sm">Unique Students</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-orange-500 text-white">
+            <CardContent className="p-2 sm:p-4 text-center">
+              <div className="text-xl sm:text-2xl font-bold">{visitorsToday}</div>
+              <p className="text-xs sm:text-sm">Visitors Today</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-purple-500 text-white">
+            <CardContent className="p-2 sm:p-4 text-center">
+              <div className="text-xl sm:text-2xl font-bold">{students.length}</div>
+              <p className="text-xs sm:text-sm">Total Students</p>
+            </CardContent>
+          </Card>
+        </div>
+
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
+          <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-1 sm:gap-0 mb-2 sm:mb-4 flex-shrink-0">
+            <TabsTrigger value="add-student" className="text-xs sm:text-sm">Add User</TabsTrigger>
+            <TabsTrigger value="edit-students" className="text-xs sm:text-sm">Manage Users</TabsTrigger>
+            <TabsTrigger value="rfid-manager" className="text-xs sm:text-sm">RFID Manager</TabsTrigger>
+            <TabsTrigger value="thesis-database" className="text-xs sm:text-sm">Thesis Database</TabsTrigger>
+            <TabsTrigger value="reports" className="text-xs sm:text-sm">Reports</TabsTrigger>
+            <TabsTrigger value="analytics" className="text-xs sm:text-sm">Live Analytics</TabsTrigger>
+            <TabsTrigger value="backup" className="text-xs sm:text-sm">Database Backup</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="add-student" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <StudentRegistration
+                onStudentRegistered={(student) => {
+                  toast({
+                    title: "Success",
+                    description: `${student.userType === 'teacher' ? 'Teacher' : 'Student'} ${student.name} has been registered`,
+                  });
+                  setActiveTab('edit-students');
+                }}
+                onClose={() => {}}
+              />
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="edit-students" className="flex-1 overflow-auto">
+            <Card>
+              <CardHeader>
+                <CardTitle>Manage Users</CardTitle>
+                <div className="flex flex-col md:flex-row gap-2 mt-4">
+                  <div className="flex items-center gap-2 flex-1">
+                    <Search className="h-4 w-4 text-gray-400" />
+                    <Input
+                      placeholder="Search by name or ID..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                    />
+                  </div>
+                  <Select value={userTypeFilter} onValueChange={(value) => {
+                    setUserTypeFilter(value);
+                    setStudentTypeFilter('all');
+                    setYearFilter('all');
+                  }}>
+                    <SelectTrigger className="w-full md:w-48">
+                      <SelectValue placeholder="Filter by user type" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-background z-50">
+                      <SelectItem value="all">All Users</SelectItem>
+                      <SelectItem value="student">👨‍🎓 Students</SelectItem>
+                      <SelectItem value="teacher">👨‍🏫 Teachers</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {userTypeFilter === 'student' && (
+                    <Select value={studentTypeFilter} onValueChange={(value) => {
+                      setStudentTypeFilter(value);
+                      setYearFilter('all');
+                    }}>
+                      <SelectTrigger className="w-full md:w-48">
+                        <SelectValue placeholder="Student type" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-background z-50">
+                        <SelectItem value="all">All Student Types</SelectItem>
+                        <SelectItem value="college">🎓 College</SelectItem>
+                        <SelectItem value="ibed">🏫 IBED</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <Select value={courseFilter} onValueChange={setCourseFilter}>
+                    <SelectTrigger className="w-full md:w-48">
+                      <SelectValue placeholder="Filter by course" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-background z-50">
+                      <SelectItem value="all">All Courses</SelectItem>
+                      {[...new Set(students.map(s => (s.course || s.department || '').trim()).filter(Boolean))].map((course) => (
+                        <SelectItem key={course} value={course}>{course}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select value={yearFilter} onValueChange={setYearFilter}>
+                    <SelectTrigger className="w-full md:w-48">
+                      <SelectValue placeholder="Filter by year" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-background z-50">
+                      <SelectItem value="all">All Years</SelectItem>
+                      {getYearOptions().map((year) => (
+                        <SelectItem key={year} value={year}>{year}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <ScrollArea className="h-[500px]">
+                  <div className="space-y-3 pr-4">
+                    {paginatedStudents.length > 0 ? (
+                      paginatedStudents.map((student) => (
+                        <div key={student.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                          <div className="flex-1">
+                            <h3 className="font-semibold text-lg">{student.name}</h3>
+                            <div className="flex flex-wrap gap-2 mt-1">
+                              <Badge variant="secondary">ID: {student.studentId}</Badge>
+                              {student.userType && <Badge variant="outline">{student.userType === 'teacher' ? '👨‍🏫 Teacher' : '👨‍🎓 Student'}</Badge>}
+                              {student.studentType && <Badge variant="outline">{student.studentType === 'ibed' ? '🏫 IBED' : '🎓 College'}</Badge>}
+                              {student.course && <Badge variant="outline">{student.course}</Badge>}
+                              {student.year && <Badge variant="outline">{student.year}</Badge>}
+                            </div>
+                            <p className="text-sm text-gray-600 mt-1">{student.email}</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setEditingStudent(student)}
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDeleteStudent(student.id)}
+                            >
+                              <Trash2 className="h-4 w-4 text-red-500" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-8 text-muted-foreground">
+                        No students found matching your filters
+                      </div>
+                    )}
+                  </div>
+                </ScrollArea>
+                {filteredStudents.length > 0 && (
+                  <StudentPagination
+                    currentPage={studentPage}
+                    totalPages={totalPages}
+                    itemsPerPage={studentsPerPage}
+                    totalItems={filteredStudents.length}
+                    onPageChange={(page) => setStudentPage(page)}
+                    onItemsPerPageChange={(perPage) => {
+                      setStudentsPerPage(perPage);
+                      setStudentPage(1);
+                    }}
+                  />
+                )}
+              </CardContent>
+            </Card>
+
+            <Dialog open={!!editingStudent} onOpenChange={(open) => !open && setEditingStudent(null)}>
+              <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>Edit User Information</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <Label>User Type</Label>
+                      <Select
+                        value={editingStudent?.userType || 'student'}
+                        onValueChange={(value: 'student' | 'teacher') => 
+                          setEditingStudent(editingStudent ? {
+                            ...editingStudent, 
+                            userType: value,
+                            course: value === 'teacher' ? 'Teacher' : editingStudent.course,
+                            year: value === 'teacher' ? 'N/A' : editingStudent.year
+                          } : null)
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="student">👨‍🎓 Student</SelectItem>
+                          <SelectItem value="teacher">👨‍🏫 Teacher</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {editingStudent?.userType === 'student' && (
+                      <div>
+                        <Label>Student Type</Label>
+                        <Select
+                          value={editingStudent?.studentType || 'college'}
+                          onValueChange={(value: 'ibed' | 'college') => 
+                            setEditingStudent(editingStudent ? {...editingStudent, studentType: value} : null)
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ibed">🏫 IBED</SelectItem>
+                            <SelectItem value="college">🎓 COLLEGE</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    <div>
+                      <Label>Name</Label>
+                      <Input
+                        value={editingStudent?.name || ''}
+                        onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, name: e.target.value} : null)}
+                      />
+                    </div>
+                    <div>
+                      <Label>{editingStudent?.userType === 'teacher' ? 'Teacher ID' : 'Student ID'}</Label>
+                      <Input
+                        value={editingStudent?.studentId || ''}
+                        onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, studentId: e.target.value} : null)}
+                      />
+                    </div>
+
+                    {editingStudent?.userType === 'student' && (
+                      <div>
+                        <Label>Level</Label>
+                        <Select
+                          value={editingStudent?.level || ''}
+                          onValueChange={(value) => 
+                            setEditingStudent(editingStudent ? {...editingStudent, level: value as any} : null)
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select level" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {editingStudent?.studentType === 'ibed' ? (
+                              <>
+                                <SelectItem value="elementary">Elementary</SelectItem>
+                                <SelectItem value="junior-high">Junior High</SelectItem>
+                                <SelectItem value="senior-high">Senior High</SelectItem>
+                              </>
+                            ) : (
+                              <SelectItem value="college">College</SelectItem>
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    {editingStudent?.userType === 'student' && 
+                     editingStudent?.level === 'senior-high' && (
+                      <div>
+                        <Label>Strand</Label>
+                        <Input
+                          value={editingStudent?.strand || ''}
+                          onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, strand: e.target.value} : null)}
+                          placeholder="Enter strand (e.g., STEM, ABM, HUMSS)"
+                        />
+                      </div>
+                    )}
+
+                    {editingStudent?.userType === 'student' && 
+                     editingStudent?.level !== 'senior-high' &&
+                     !(editingStudent?.studentType === 'ibed' && 
+                       (editingStudent?.level === 'elementary' || editingStudent?.level === 'junior-high')) && (
+                      <div>
+                        <Label>Department</Label>
+                        <Input
+                          value={editingStudent?.department || ''}
+                          onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, department: e.target.value} : null)}
+                          placeholder="Enter department"
+                        />
+                      </div>
+                    )}
+
+                    {editingStudent?.userType === 'student' && 
+                     editingStudent?.studentType === 'college' && (
+                      <div>
+                        <Label>Course/Program</Label>
+                        <Input
+                          value={editingStudent?.course || ''}
+                          onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, course: e.target.value} : null)}
+                        />
+                      </div>
+                    )}
+
+                    {editingStudent?.userType === 'student' && (
+                      <div>
+                        <Label>Year</Label>
+                        {editingStudent?.studentType === 'ibed' ? (
+                          <Select
+                            value={editingStudent?.year || ''}
+                            onValueChange={(value) => 
+                              setEditingStudent(editingStudent ? {...editingStudent, year: value} : null)
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select year" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="Kinder">Kinder</SelectItem>
+                              <SelectItem value="Grade 1">Grade 1</SelectItem>
+                              <SelectItem value="Grade 2">Grade 2</SelectItem>
+                              <SelectItem value="Grade 3">Grade 3</SelectItem>
+                              <SelectItem value="Grade 4">Grade 4</SelectItem>
+                              <SelectItem value="Grade 5">Grade 5</SelectItem>
+                              <SelectItem value="Grade 6">Grade 6</SelectItem>
+                              <SelectItem value="Grade 7">Grade 7</SelectItem>
+                              <SelectItem value="Grade 8">Grade 8</SelectItem>
+                              <SelectItem value="Grade 9">Grade 9</SelectItem>
+                              <SelectItem value="Grade 10">Grade 10</SelectItem>
+                              <SelectItem value="Grade 11">Grade 11</SelectItem>
+                              <SelectItem value="Grade 12">Grade 12</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Select
+                            value={editingStudent?.year || ''}
+                            onValueChange={(value) => 
+                              setEditingStudent(editingStudent ? {...editingStudent, year: value} : null)
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select year" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1st Year">1st Year</SelectItem>
+                              <SelectItem value="2nd Year">2nd Year</SelectItem>
+                              <SelectItem value="3rd Year">3rd Year</SelectItem>
+                              <SelectItem value="4th Year">4th Year</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        )}
+                      </div>
+                    )}
+
+                    <div>
+                      <Label>Email</Label>
+                      <Input
+                        value={editingStudent?.email || ''}
+                        onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, email: e.target.value} : null)}
+                      />
+                    </div>
+
+                    <div>
+                      <Label>RFID</Label>
+                      <Input
+                        value={editingStudent?.rfid || ''}
+                        onChange={(e) => setEditingStudent(editingStudent ? {...editingStudent, rfid: e.target.value} : null)}
+                        placeholder="Scan or enter RFID"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 pt-4">
+                    <Button onClick={handleEditStudent} className="flex-1">Save Changes</Button>
+                    <Button variant="outline" onClick={() => setEditingStudent(null)} className="flex-1">Cancel</Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </TabsContent>
+
+
+          <TabsContent value="rfid-manager" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <RFIDDataManager students={students} onDataUpdated={loadData} />
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="thesis-database" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <ThesisDatabaseManager />
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="reports" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BarChart3 className="h-6 w-6" />
+                  Reports
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <Label>Report Type</Label>
+                    <Select value={reportFilter.reportType} onValueChange={(value) => setReportFilter({...reportFilter, reportType: value})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-background z-50">
+                        <SelectItem value="attendance">Attendance Report</SelectItem>
+                        <SelectItem value="time-spent">Time Spent</SelectItem>
+                        <SelectItem value="analytics">Analytics Report</SelectItem>
+                        <SelectItem value="category-summary">Category Summary</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Export Format</Label>
+                    <Select value={reportFilter.exportFormat} onValueChange={(value) => setReportFilter({...reportFilter, exportFormat: value})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-background z-50">
+                        <SelectItem value="csv">CSV</SelectItem>
+                        <SelectItem value="pdf">PDF</SelectItem>
+                        <SelectItem value="xlsx">Excel (XLSX)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Time Period</Label>
+                    <Select value={reportFilter.period} onValueChange={(value) => setReportFilter({...reportFilter, period: value})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-background z-50">
+                        <SelectItem value="today">Today</SelectItem>
+                        <SelectItem value="yesterday">Yesterday</SelectItem>
+                        <SelectItem value="week">This Week</SelectItem>
+                        <SelectItem value="month">This Month</SelectItem>
+                        <SelectItem value="custom">Custom Range</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {reportFilter.period === 'custom' && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border rounded-lg bg-muted/30">
+                    <div className="space-y-2">
+                      <Label>Start Date</Label>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            className={cn(
+                              "w-full justify-start text-left font-normal",
+                              !customStartDate && "text-muted-foreground"
+                            )}
+                          >
+                            <CalendarIcon className="mr-2 h-4 w-4" />
+                            {customStartDate ? format(customStartDate, "PPP") : <span>Select start date</span>}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-auto p-0 z-50" align="start">
+                          <CalendarComponent
+                            mode="single"
+                            selected={customStartDate}
+                            onSelect={setCustomStartDate}
+                            initialFocus
+                            className="p-3 pointer-events-auto"
+                          />
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>End Date</Label>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            className={cn(
+                              "w-full justify-start text-left font-normal",
+                              !customEndDate && "text-muted-foreground"
+                            )}
+                          >
+                            <CalendarIcon className="mr-2 h-4 w-4" />
+                            {customEndDate ? format(customEndDate, "PPP") : <span>Select end date</span>}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-auto p-0 z-50" align="start">
+                          <CalendarComponent
+                            mode="single"
+                            selected={customEndDate}
+                            onSelect={setCustomEndDate}
+                            initialFocus
+                            className="p-3 pointer-events-auto"
+                          />
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <Label>User Type</Label>
+                    <Select value={reportFilter.userType} onValueChange={(value) => setReportFilter({...reportFilter, userType: value, studentType: 'all', course: 'all', year: 'all', gradeLevel: 'all', strand: 'all'})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-background z-50">
+                        <SelectItem value="all">All Users</SelectItem>
+                        <SelectItem value="student">Students</SelectItem>
+                        <SelectItem value="teacher">Teachers</SelectItem>
+                        <SelectItem value="visitor">Visitors</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {reportFilter.userType === 'student' && (
+                    <>
+                      <div>
+                        <Label>Student Type</Label>
+                        <Select 
+                          value={reportFilter.studentType} 
+                          onValueChange={(value) => setReportFilter({
+                          ...reportFilter, 
+                          studentType: value,
+                          course: 'all',
+                          year: 'all',
+                          gradeLevel: 'all',
+                          strand: 'all'
+                        })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="All Students" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-background z-50">
+                            <SelectItem value="all">All Students</SelectItem>
+                            <SelectItem value="college">College</SelectItem>
+                            <SelectItem value="ibed">IBED (SHS)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {reportFilter.studentType === 'college' && (
+                        <div>
+                          <Label>Year Level</Label>
+                          <Select 
+                            value={reportFilter.year} 
+                            onValueChange={(value) => setReportFilter({...reportFilter, year: value})}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="All Years" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-background z-50">
+                              <SelectItem value="all">All Years</SelectItem>
+                              <SelectItem value="1st Year">1st Year</SelectItem>
+                              <SelectItem value="2nd Year">2nd Year</SelectItem>
+                              <SelectItem value="3rd Year">3rd Year</SelectItem>
+                              <SelectItem value="4th Year">4th Year</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+
+                      {reportFilter.studentType === 'ibed' && (
+                        <div>
+                          <Label>Grade Level</Label>
+                          <Select 
+                            value={reportFilter.gradeLevel} 
+                            onValueChange={(value) => setReportFilter({...reportFilter, gradeLevel: value})}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="All Grade Levels" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-background z-50">
+                              <SelectItem value="all">All Grade Levels</SelectItem>
+                              <SelectItem value="Grade 11">Grade 11</SelectItem>
+                              <SelectItem value="Grade 12">Grade 12</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {reportFilter.userType === 'student' && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {reportFilter.studentType === 'college' && (
+                      <div>
+                        <Label>Course</Label>
+                        <Select 
+                          value={reportFilter.course} 
+                          onValueChange={(value) => setReportFilter({...reportFilter, course: value})}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="All Courses" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-background z-50 max-h-[300px]">
+                            <SelectItem value="all">All Courses</SelectItem>
+                            {Array.from(new Set(
+                              students
+                                .filter(s => s.studentType === 'college')
+                                .map(s => s.course)
+                                .filter(Boolean)
+                            )).sort().map((course) => (
+                              <SelectItem key={course} value={course!}>
+                                {course}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    {reportFilter.studentType === 'ibed' && (
+                      <div>
+                        <Label>Strand</Label>
+                        <Select 
+                          value={reportFilter.strand} 
+                          onValueChange={(value) => setReportFilter({...reportFilter, strand: value})}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="All Strands" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-background z-50">
+                            <SelectItem value="all">All Strands</SelectItem>
+                            <SelectItem value="ABM">ABM</SelectItem>
+                            <SelectItem value="HUMSS">HUMSS</SelectItem>
+                            <SelectItem value="STEM">STEM</SelectItem>
+                            <SelectItem value="ICT">ICT</SelectItem>
+                            <SelectItem value="HE">HE</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                <Button onClick={generateAdvancedReport} className="w-full">
+                  <Download className="mr-2 h-4 w-4" />
+                  Export Report
+                </Button>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+                  <ChartTimeSeries attendanceRecords={getFilteredRecords()} />
+                  <ChartCourseDistribution attendanceRecords={getFilteredRecords()} students={students} />
+                </div>
+              </CardContent>
+            </Card>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="analytics" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Activity className="h-5 w-5" />
+                    Recent Activity
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {todayRecords.slice(0, 10).map((record, index) => (
+                      <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold ${
+                            record.studentId === 'VISITOR' ? 'bg-orange-500' : 'bg-blue-500'
+                          }`}>
+                            {record.studentId === 'VISITOR' ? 'V' : record.studentName.charAt(0)}
+                          </div>
+                          <div>
+                            <p className="font-medium text-sm">{record.studentName}</p>
+                            <p className="text-xs text-gray-500">
+                              {record.studentId === 'VISITOR' ? 'Visitor' : record.studentId}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-medium">
+                            {format(new Date(record.timestamp), 'HH:mm')}
+                          </p>
+                          <Badge variant="outline" className="text-xs">
+                            {record.method || 'RF ID'}
+                          </Badge>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Clock className="h-5 w-5" />
+                    System Status
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex justify-between items-center p-3 bg-blue-50 rounded">
+                    <span>Total Records</span>
+                    <Badge variant="secondary">{attendanceRecords.length}</Badge>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-green-50 rounded">
+                    <span>Registered Students</span>
+                    <Badge variant="secondary">{students.length}</Badge>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-orange-50 rounded">
+                    <span>Today's Activity</span>
+                    <Badge variant="secondary">{todayRecords.length}</Badge>
+                  </div>
+                  <div className="flex justify-between items-center p-3 bg-purple-50 rounded">
+                    <span>System Status</span>
+                    <Badge className="bg-green-500">Online</Badge>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="backup" className="flex-1 overflow-auto">
+            <ScrollArea className="h-full">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Database className="h-5 w-5" />
+                    Database Backup & Restore
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <h3 className="font-semibold text-blue-900 mb-2">📦 Supabase Cloud Backup</h3>
+                    <p className="text-sm text-blue-700 mb-4">
+                      Download all data from Supabase (students, attendance, documents) as a portable SQLite database file.
+                    </p>
+                    <Button 
+                      onClick={handleSupabaseBackup} 
+                      disabled={isBackingUp}
+                      className="w-full sm:w-auto"
+                    >
+                      {isBackingUp ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Creating Backup...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download Supabase Data as SQLite
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  {window.electronAPI && (
+                    <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+                      <h3 className="font-semibold text-green-900 mb-2">💾 Local Electron Backup</h3>
+                      <p className="text-sm text-green-700 mb-4">
+                        Backup and restore your local Electron SQLite database.
+                      </p>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <Button 
+                          onClick={async () => {
+                            try {
+                              const result = await window.electronAPI.createBackup();
+                              if (result.success) {
+                                toast({
+                                  title: "Backup Created",
+                                  description: `Backup saved to: ${result.path}`,
+                                });
+                              }
+                            } catch (error: any) {
+                              toast({
+                                title: "Backup Failed",
+                                description: error.message,
+                                variant: "destructive",
+                              });
+                            }
+                          }}
+                          variant="outline"
+                        >
+                          <Database className="mr-2 h-4 w-4" />
+                          Backup Local Database
+                        </Button>
+                        <Button 
+                          onClick={async () => {
+                            if (!confirm('This will restore from the most recent backup. Continue?')) return;
+                            try {
+                              const result = await window.electronAPI.restoreBackup();
+                              if (result.success) {
+                                toast({
+                                  title: "Restore Complete",
+                                  description: "Database restored successfully. Please restart the application.",
+                                });
+                              }
+                            } catch (error: any) {
+                              toast({
+                                title: "Restore Failed",
+                                description: error.message,
+                                variant: "destructive",
+                              });
+                            }
+                          }}
+                          variant="outline"
+                        >
+                          <RotateCcw className="mr-2 h-4 w-4" />
+                          Restore Local Database
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <h3 className="font-semibold text-gray-900 mb-2">ℹ️ Backup Information</h3>
+                    <ul className="text-sm text-gray-600 space-y-2">
+                      <li>• <strong>Supabase Backup:</strong> Creates a portable SQLite file from cloud data</li>
+                      <li>• <strong>Local Backup:</strong> Only available in Electron, copies local database</li>
+                      <li>• <strong>File Format:</strong> Standard SQLite database (.db file)</li>
+                      <li>• <strong>Usage:</strong> Open with DB Browser for SQLite or restore to Electron</li>
+                      <li>• <strong>Timestamp:</strong> Each backup file includes date and time</li>
+                    </ul>
+                  </div>
+                </CardContent>
+              </Card>
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
+      </div>
+    </div>
+  );
+};
+
+export default EnhancedAdminPage;
